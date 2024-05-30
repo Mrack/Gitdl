@@ -1,11 +1,10 @@
-use std::fs;
+use std::{env, fs};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::string::String;
 use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use threadpool::ThreadPool;
 
 struct GitApi {
@@ -27,12 +26,12 @@ impl GitApi {
         let mut paths = url_git.path_segments().ok_or(anyhow::anyhow!("url error"))?;
         let repo = format!("{}/{}",
                            paths.nth(0).unwrap(),
-                           paths.nth(0).unwrap());
-        println!("repo: {}", repo);
+                           paths.nth(0).unwrap()).replace(".git", "");
+        println!("repo: {} ref:{}", repo, ref_);
         let client = if proxy.len() == 0 {
-            reqwest::blocking::Client::builder()
+            reqwest::blocking::Client::builder().gzip(true)
         } else {
-            reqwest::blocking::Client::builder().proxy(reqwest::Proxy::all(proxy).unwrap())
+            reqwest::blocking::Client::builder().gzip(true).proxy(reqwest::Proxy::all(proxy).unwrap())
         };
 
         Ok(GitApi {
@@ -48,31 +47,38 @@ impl GitApi {
         let resp = self.client.get(url)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36")
             .header("Accept", "application/vnd.github.v3+json")
-            .header("Encoding", "gzip")
+            .header("Accept-Encoding", "gzip")
             .send()?;
-        let s = resp.text()?;
-        let j: T = serde_json::from_str(&s)?;
-        Ok(j)
+        Ok(serde_json::from_str(resp.text()?.as_str())?)
     }
 
     fn get_files(&self) -> anyhow::Result<Vec<String>> {
-        let url = format!("{}/git/tree-file-list/HEAD", self.url);
-        let res = self.get::<serde_json::Value>(url)?;
-        let json_value = res.as_array().ok_or(anyhow::anyhow!("get files failed"))?;
-        let mut files = Vec::new();
-        for item in json_value {
-            files.push(item.as_str().unwrap().to_string());
-        }
-        return Ok(files);
+        let temp_file = env::temp_dir().join(format!("{}_{}.json", self.proj.replace("/", "_"), self.ref_));
+        Ok(if !temp_file.exists() {
+            let url = format!("{}/git/tree-file-list/{}", self.url, self.ref_);
+            let res: Vec<String> = self.get::<serde_json::Value>(url)?.as_array().ok_or(anyhow::anyhow!("get files failed"))?.iter().map(|v| {
+                v.as_str().unwrap().to_string()
+            }).collect();
+            let mut file = File::create(&temp_file)?;
+            let json_data = serde_json::to_string(&res)?;
+            file.write_all(json_data.as_bytes())?;
+            res
+        } else {
+            let mut file = File::open(&temp_file)?;
+            let mut contents = String::new();
+            file.read_to_string(&mut contents)?;
+            serde_json::from_str(&contents)?
+        })
     }
 
 
     fn download(&self, path: &String) -> anyhow::Result<String> {
-        let url = format!("https://raw.githubusercontent.com/{}/{}/{}", self.proj, "HEAD", path);
+        let url = format!("https://raw.githubusercontent.com/{}/{}/{}", self.proj, self.ref_, path);
         let resp = self.client.get(url)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome")
+            .header("Accept-Encoding", "gzip")
             .send()?;
-        let save_name = format!("{}/{}", &self.proj, path.replace(".git", ""));
+        let save_name = format!("{}/{}", &self.proj, path);
         let save_path = std::path::Path::new(&save_name);
         if let Some(dir_path) = save_path.parent() {
             fs::create_dir_all(dir_path)?;
@@ -90,7 +96,7 @@ impl GitApi {
 fn main() -> anyhow::Result<()> {
     let matches = clap::Command::new("gitdl")
         .author("mrack")
-        .version("0.1")
+        .version("0.2")
         .about("download github repo")
         .arg(clap::Arg::new("url")
             .required(true)
@@ -118,7 +124,7 @@ fn main() -> anyhow::Result<()> {
     let _ref = matches.get_one::<String>("ref").unwrap();
     let api = Arc::new(GitApi::new(url.to_string(), proxy.to_string(), _ref.to_string())?);
     let files = api.get_files()?;
-    let pool = ThreadPool::new(8);
+    let pool = ThreadPool::new(num_cpus::get() * 2);
     for file in files {
         if glob::Pattern::new(pattern)?.matches(&file) {
             let api = api.clone();
