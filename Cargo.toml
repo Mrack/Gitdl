@@ -1,0 +1,25 @@
+[package]
+name = "gitdl"
+version = "0.1.0"
+edition = "2021"
+authors = ["mrack"]
+
+[dependencies]
+anyhow = "1.0.86"
+regex = "1.10.4"
+reqwest = { version = "0.12.4", features = ["blocking", "socks"] }
+serde_json = "1.0.117"
+serde = { version = "1.0.203", features = ["derive"] }
+glob = "0.3.1"
+bytes = "1.6.0"
+threadpool = "1.8.1"
+clap = { version = "4.5.4", features = ["cargo"] }
+human-panic = "2.0.0"
+url = "2.5.0"
+
+[profile.release]
+lto = true
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+strip = true
